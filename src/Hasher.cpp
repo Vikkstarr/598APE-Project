@@ -1,3 +1,10 @@
+#include <string>
+#include <vector>
+#include <thread>
+#include <mutex>
+#include <queue>
+#include <algorithm>
+
 class Hasher {
     private:
         unsigned numThreads;
@@ -95,5 +102,17 @@ class QuadraticHashTable {
                     return false;
                 }
             }
+        }
+
+        template<int k> uint64_t
+        hash(const std::string& x, const int i) {
+            // interpret x as sequence of 32 bases
+            uint64_t* data = (uint64_t*) &x;
+            uint64_t res = 0; // hash value
+
+            // for each block of 32 bases
+            for(int c = 0; c< (k + 31) / 32; ++c) res += 453569 * res + data[c];
+
+            return res + 5696063 * i * i;
         }
 }
