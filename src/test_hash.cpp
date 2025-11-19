@@ -96,7 +96,7 @@ int main() {
     
     // Test 6: Collision handling with similar k-mers
     std::cout << "Test 6: K-mers with similar prefixes\n";
-    QuadraticHashTable table6(1009, 10);
+    QuadraticHashTable table6(1009, 1);
     std::vector<std::string> similar_kmers;
     similar_kmers.push_back("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
     similar_kmers.push_back("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB");

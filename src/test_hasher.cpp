@@ -7,8 +7,12 @@
 #include <unordered_map>
 #include "Hasher.h"
 
+// Default hash table parameters
+const size_t DEFAULT_TABLE_SIZE = 1000000;
+const size_t DEFAULT_MAX_STEPS = 100;
+
 // Helper function to create test k-mers
-std::vector<std::string> generateTestKmers(int count, int kmerLength = 32) {
+std::vector<std::string> generateTestKmers(int count, int kmerLength = 31) {
     std::vector<std::string> kmers;
     const char bases[] = "ACGT";
     
@@ -47,7 +51,10 @@ std::unordered_map<std::string, size_t> manualCount(const std::vector<std::strin
 // Compare two maps
 bool compareMaps(const std::unordered_map<std::string, size_t>& map1,
                  const std::unordered_map<std::string, size_t>& map2) {
-    if (map1.size() != map2.size()) return false;
+    if (map1.size() != map2.size()) {
+        std::cout << "    Size mismatch: " << map1.size() << " vs " << map2.size() << "\n";
+        return false;
+    }
     
     for (const auto& entry : map1) {
         auto it = map2.find(entry.first);
@@ -72,7 +79,7 @@ void testHasher(unsigned numThreads, int numKmers, int blockSize) {
     std::cout << "  Created " << queue.size() << " blocks\n";
     
     // Create hasher with specified threads
-    Hasher hasher(queue, numThreads);
+    Hasher hasher(queue, numThreads, DEFAULT_TABLE_SIZE, DEFAULT_MAX_STEPS);
     
     // Start timing
     auto start = std::chrono::high_resolution_clock::now();
@@ -143,7 +150,7 @@ void testDuplicates() {
     block2->kmers.push_back("TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT");
     queue.push(block2);
     
-    Hasher hasher(queue, 2);
+    Hasher hasher(queue, 2, DEFAULT_TABLE_SIZE, DEFAULT_MAX_STEPS);
     
     std::vector<std::thread> threads;
     for (unsigned i = 0; i < 2; i++) {
@@ -175,7 +182,7 @@ void testEmptyQueue() {
     std::cout << "\n=== Test: Empty queue ===\n";
     
     std::queue<KmerBlock*> queue;
-    Hasher hasher(queue, 2);
+    Hasher hasher(queue, 2, DEFAULT_TABLE_SIZE, DEFAULT_MAX_STEPS);
     
     std::vector<std::thread> threads;
     for (unsigned i = 0; i < 2; i++) {
@@ -197,7 +204,7 @@ void testEmptyQueue() {
 
 void speedComparison() {
     std::cout << "\n=== Speed Comparison ===\n";
-    const int numKmers = 1000000;
+    const int numKmers = 5000000;
     const int blockSize = 100;
     
     std::vector<unsigned> threadCounts = {1, 2, 4, 8};
@@ -208,7 +215,7 @@ void speedComparison() {
         std::queue<KmerBlock*> queue;
         populateQueue(queue, testKmers, blockSize);
         
-        Hasher hasher(queue, numThreads);
+        Hasher hasher(queue, numThreads, DEFAULT_TABLE_SIZE, DEFAULT_MAX_STEPS);
         
         auto start = std::chrono::high_resolution_clock::now();
         
@@ -230,7 +237,7 @@ void speedComparison() {
         std::cout << "  " << numThreads << " thread(s): " << duration.count() << " ms\n";
     }
     
-    if (times.size() > 1) {
+    if (times.size() > 1 && times[0] > 0) {
         std::cout << "  Speedup (1 vs " << threadCounts.back() << " threads): " 
                   << (double)times[0] / times.back() << "x\n";
     }
