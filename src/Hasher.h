@@ -9,30 +9,29 @@
 #include <unordered_map>
 #include <condition_variable>
 #include "QuadraticHashTable.h"
-
-struct KmerBlock {
-    std::vector<std::string> kmers;
-};
+#include "data_structs.h"
 
 class Hasher {
     private:
+        std::queue<KmerBlock*>& inputQueue;
         unsigned numThreads;
-        bool workComplete;
-
+        
         std::mutex queueLock;
         std::condition_variable cv;
-        std::queue<KmerBlock*>& inputQueue;
-
-        std::vector<QuadraticHashTable> threadTables;
+        
         std::unordered_map<std::string, size_t> globalMap;
 
     public:
-        Hasher(std::queue<KmerBlock*>& queue, unsigned threads = std::thread::hardware_concurrency(), 
-               size_t tableSize = 1000003, size_t maxSteps = 10);
+        std::vector<QuadraticHashTable> threadTables;
+        bool workComplete;
+
+        Hasher(std::queue<KmerBlock*>& queue, unsigned threads, size_t tableSize, size_t maxSteps);
         
         void worker(unsigned threadId);
         void mergeResults();
+        void writeResults(std::string filename);
         void signalComplete();
+        
         const std::unordered_map<std::string, size_t>& getResults() const;
 };
 
