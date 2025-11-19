@@ -1,6 +1,7 @@
 #include "Hasher.h"
 #include <algorithm>
 #include <chrono>
+#include <fstream>
 
 Hasher::Hasher(std::queue<KmerBlock*>& queue, unsigned threads, size_t tableSize, size_t maxSteps)
     : inputQueue(queue), numThreads(threads), workComplete(false) {
@@ -39,6 +40,13 @@ void Hasher::mergeResults() {
     
     for (const auto& table : threadTables) {
         table.exportToMap(globalMap);
+    }
+}
+
+void Hasher::writeResults(std::string filename) {
+    std::ofstream out(filename);
+    for (const auto& [kmer, count] : globalMap) {
+        out << kmer << '\t' << count << '\n';
     }
 }
 
