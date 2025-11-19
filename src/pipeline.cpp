@@ -188,10 +188,10 @@ void generateTestFasta(const std::string& filename, size_t length) {
 }
 
 int main() {
-    const int k = 31;
-    const int m = 15;
-    const unsigned NUM_THREADS = 4;
-    const size_t HASH_TABLE_SIZE = 1000000;
+    const int k = 6;
+    const int m = 5;
+    const unsigned NUM_THREADS = 8;
+    const size_t HASH_TABLE_SIZE = 10000000;
     const size_t MAX_PROBE_STEPS = 100;
 
     std::cout << "Generating test FASTA...\n";
@@ -225,34 +225,7 @@ int main() {
     
     std::cout << "Launching " << NUM_THREADS << " worker threads...\n";
     for (unsigned i = 0; i < NUM_THREADS; i++) {
-        threads.emplace_back([&hasher, i, &queueLock, &cv, &inputQueue]() {
-            auto& table = hasher.threadTables[i];
-            
-            while (true) {
-                KmerBlock* block = nullptr;
-                {
-                    std::unique_lock<std::mutex> lock(queueLock);
-                    
-                    cv.wait(lock, [&inputQueue, &hasher]() { 
-                        return !inputQueue.empty() || hasher.workComplete; 
-                    });
-                    
-                    if (!inputQueue.empty()) {
-                        block = inputQueue.front();
-                        inputQueue.pop();
-                    } else if (hasher.workComplete && inputQueue.empty()) {
-                        break;
-                    }
-                }
-                
-                if (block) {
-                    for (const auto& kmer : block->kmers) {
-                        table.insert(kmer);
-                    }
-                    delete block;
-                }
-            }
-        });
+        threads.emplace_back(&Hasher::worker, &hasher, i);
     }
 
     std::cout << "Pushing super-mers to queue...\n";
@@ -269,6 +242,13 @@ int main() {
     }
 
     std::cout << "Merging results from " << NUM_THREADS << " threads...\n";
+
+    // Debug: Check each thread's table before merging
+    for (unsigned i = 0; i < NUM_THREADS; i++) {
+        std::cout << "Thread " << i << " table:\n";
+        hasher.threadTables[i].printStats();
+    }
+
     hasher.mergeResults();
     
     const auto& results = hasher.getResults();

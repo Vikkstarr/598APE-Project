@@ -1,7 +1,6 @@
 #include "Hasher.h"
-#include <algorithm>
-#include <chrono>
 #include <fstream>
+#include <iostream>
 
 Hasher::Hasher(std::queue<KmerBlock*>& queue, unsigned threads, size_t tableSize, size_t maxSteps)
     : inputQueue(queue), numThreads(threads), workComplete(false) {
@@ -12,25 +11,32 @@ Hasher::Hasher(std::queue<KmerBlock*>& queue, unsigned threads, size_t tableSize
 
 void Hasher::worker(unsigned threadId) {
     QuadraticHashTable& table = threadTables[threadId];
-
+    
     while (true) {
         KmerBlock* block = nullptr;
-        std::unique_lock<std::mutex> lock(queueLock);
-        
-        cv.wait(lock, [this]() { return !inputQueue.empty() || workComplete; });
-        
-        if (!inputQueue.empty()) {
-            block = inputQueue.front();
-            inputQueue.pop();
-            lock.unlock();
-        } else if (workComplete) {
-            break;
+        {
+            std::unique_lock<std::mutex> lock(queueLock);
+            cv.wait(lock, [this]() { 
+                return !inputQueue.empty() || workComplete; 
+            });
+            
+            if (!inputQueue.empty()) {
+                block = inputQueue.front();
+                inputQueue.pop();
+            } else if (workComplete && inputQueue.empty()) {
+                break;
+            }
         }
-
+        
         if (block) {
             for (const auto& kmer : block->kmers) {
-                table.insert(kmer);
+                if (!table.insert(kmer)) {
+                    // Insertion failed, add to overflow
+                    std::lock_guard<std::mutex> lock(overflowLock);
+                    overflow.push_back(kmer);
+                }
             }
+            delete block;
         }
     }
 }
@@ -41,6 +47,17 @@ void Hasher::mergeResults() {
     for (const auto& table : threadTables) {
         table.exportToMap(globalMap);
     }
+    
+    std::unordered_map<std::string, size_t> overflowCounts;
+    for (const auto& k : overflow) {
+        overflowCounts[k]++;
+    }
+    
+    for (const auto& [k, c] : overflowCounts) {
+        globalMap[k] += c;
+    }
+    
+    overflow.clear();
 }
 
 void Hasher::writeResults(std::string filename) {

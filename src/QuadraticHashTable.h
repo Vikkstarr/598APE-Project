@@ -5,6 +5,8 @@
 #include <vector>
 #include <cstdint>
 #include <unordered_map>
+#include <functional>
+#include <iostream>
 
 class QuadraticHashTable {
     private:
@@ -20,7 +22,7 @@ class QuadraticHashTable {
                 keys.resize(size);
                 values.resize(size);
 
-                for (int i = 0; i < tableSize; i++) {
+                for (size_t i = 0; i < tableSize; i++) {
                     keys[i] = "";
                     values[i] = 0;
                 }
@@ -31,7 +33,7 @@ class QuadraticHashTable {
             size_t hashPos;
             
             while (true) {
-                hashPos = hash<32>(kmer, i) % tableSize;
+                hashPos = computeHash(kmer, i) % tableSize;
 
                 if (keys[hashPos] == "") {
                     keys[hashPos] = kmer;
@@ -53,16 +55,11 @@ class QuadraticHashTable {
             }
         }
 
-        template<int k> uint64_t
-        hash(const std::string& x, const int i) {
-            const uint64_t* data = reinterpret_cast<const uint64_t*>(x.data());
-            uint64_t res = 0;
-
-            for(int c = 0; c < (k + 7) / 8; ++c) {
-                res = 453569 * res + data[c];
-            }
-
-            return res + 5696063 * i * i;
+        uint64_t computeHash(const std::string& str, size_t i) const {
+            std::hash<std::string> hasher;
+            uint64_t baseHash = hasher(str);
+            
+            return baseHash + 5696063 * i * i;
         }
 
         void exportToMap(std::unordered_map<std::string, size_t>& map) const {
@@ -71,6 +68,19 @@ class QuadraticHashTable {
                     map[keys[i]] += values[i];
                 }
             }
+        }
+        
+        void printStats() const {
+            size_t occupied = 0;
+            size_t totalCount = 0;
+            for (size_t i = 0; i < tableSize; i++) {
+                if (keys[i] != "") {
+                    occupied++;
+                    totalCount += values[i];
+                }
+            }
+            std::cout << "  Slots occupied: " << occupied << "/" << tableSize << "\n";
+            std::cout << "  Total k-mer count: " << totalCount << "\n";
         }
 };
 
