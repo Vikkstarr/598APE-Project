@@ -4,3 +4,6 @@ src/test_10mb.fasta
 src/test_large.fasta
 test_10mb.fasta
 test_10mb.fasta
+src/test_1gb.fasta
+src/GCA_000002315.5_GRCg6a_genomic.fna
+src/GCF_000002315.6_GRCg6a_genomic.fna

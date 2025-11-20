@@ -148,8 +148,6 @@ std::vector<std::string> computeSuperMers(const std::string &seq, int m, int k) 
     auto minimizers = computeAllMinimizers(seq, m, k);
 
     //double end = omp_get_wtime();
-    //std::cout << "Time to compute all minimizers: " << (end - start) << " seconds\n";
-
     std::vector<std::string> superMers;
     std::string curSuperMer = "";
     std::string curMinimizer = "";
@@ -192,7 +190,7 @@ void pushSuperMersToQueue(const std::vector<std::string>& superMers, int k,
                            std::queue<KmerBlock*>& inputQueue,
                            std::mutex& queueLock,
                            std::condition_variable& cv) {
-    // first u want to reserve a batching of 10
+    // first u want to reserve a batching of 10- changees depending on how big the file is
     std::vector<KmerBlock*> localBatch;
     localBatch.reserve(10);
 
@@ -231,7 +229,7 @@ void pushSuperMersToQueue(const std::vector<std::string>& superMers, int k,
 
 }
 
- #include <fstream>
+#include <fstream>
 #include <random>
 #include <thread>
 
@@ -257,32 +255,26 @@ int main() {
 
     using clock = std::chrono::high_resolution_clock;
 
-    // ------------------------
-    // TOTAL TIMER START
-    // ------------------------
+   // timer check
     auto total_start = clock::now();
 
     // 1. Generate small FASTA
     std::cout << "Generating test FASTA...\n";
-    generateTestFasta("test_large.fasta", 5'000'000); // 5 million bases
+    generateTestFasta("test_large.fasta", 5'000'000); // 5 million so 5mb
 
     // 2. Read FASTA into bundles
-    std::cout << "Reading FASTA bundles...\n";
+    std::cout << "Reading FASTA...\n";
     FastReader reader("test_large.fasta");
     auto bundles = reader.readFile();
     std::cout << "Read " << bundles.size() << " bundles\n";
 
-    // ------------------------
-    // SUPERMER PHASE TIMER
-    // ------------------------
+    //supermer timer
     auto supermer_start = clock::now();
 
     // // 3. Compute super-mers for each bundle
     std::vector<std::string> superMers;
     for (auto& b : bundles) {
-        auto partial = computeSuperMers(
-            std::string(b.data.begin(), b.data.end()), m, k
-        );
+        auto partial = computeSuperMers(std::string(b.data.begin(), b.data.end()), m, k);
         superMers.insert(superMers.end(), partial.begin(), partial.end());
     }
     
@@ -295,120 +287,110 @@ int main() {
 
     // Inspect first 5 super-mers
     std::cout << "First 5 super-mers:\n";
-    for (size_t i = 0; i < std::min(superMers.size(), size_t(5)); i++) {
-        std::cout << "Super-mer[" << i << "] length: " << superMers[i].size()
-                  << " content: " << superMers[i] << "\n";
+    for (size_t i = 0; i < std::min(superMers.size(), (size_t)5); i++) {
+        std::cout << "Super-mer[" << i << "] length: " << superMers[i].size()<< "\n";
     }
 
-    // ------------------------
-    // MULTITHREADED QUEUE PHASE TIMER
-    // ------------------------
+    // potential multithreaded que
     auto queue_start = clock::now();
 
     // 4. Expand super-mers -> KmerBlocks in parallel (no per-kmer locks)
-//    We will process the global superMers vector (already computed), partition it,
-//    let each thread produce a vector<KmerBlock*> localBlocks[t], then merge.
+    // process ssuperMers, partition, each thread produce vector, merge
 
-// Expand super-mers into KmerBlocks (parallel, no locking)
-std::queue<KmerBlock*> inputQueue;
+    // Expand super-mers into KmerBlocks (parallel, no locking)
+    std::queue<KmerBlock*> inputQueue;
 
-const unsigned NUM_THREADS = 8;
-const size_t N = superMers.size();
+    const unsigned NUM_THREADS = 8;
 
-// Divide superMers into equal ranges
-const size_t CHUNK = (N + NUM_THREADS - 1) / NUM_THREADS;
+    // Divide superMers into equal ranges
+    const size_t CHUNK = (superMers.size() + NUM_THREADS - 1) / NUM_THREADS;
 
-// each thread will have stuffper thread
-std::vector<std::vector<KmerBlock*>> localBlocks(NUM_THREADS);
+    // each thread will have stuffper thread
+    std::vector<std::vector<KmerBlock*>> localBlocks(NUM_THREADS);
 
-// Spawn worker threads
-std::vector<std::thread> workers;
-workers.reserve(NUM_THREADS);
+    const size_t n_size = superMers.size();
 
-for (unsigned thr = 0; thr < NUM_THREADS; ++thr) {
-    // each worker
-    workers.emplace_back([&, thr]() {
+    // Spawn worker threads
+    std::vector<std::thread> workers;
+    workers.reserve(NUM_THREADS);
 
-        size_t startIndex = thr * CHUNK;
-        size_t endIndex   = std::min(startIndex + CHUNK, N);
+    for (unsigned thr = 0; thr < NUM_THREADS; ++thr) {
+        // each worker
+        workers.emplace_back([&, thr]() {
 
-        // what ur trynna add to
+            size_t startIndex = thr * CHUNK;
+            size_t endIndex   = std::min(startIndex + CHUNK, n_size);
 
-        auto& myOutput = localBlocks[thr];
-        
-        // mem reserve
-        size_t numSuperMers = (endIndex > startIndex) ? (endIndex - startIndex) : 1;
-        // rough
-        size_t reserveSize = numSuperMers / 4 + 4;
+            // what ur trynna add to
 
-        // Reserve
-        myOutput.reserve(reserveSize);
+            auto& myOutput = localBlocks[thr];
+            
+            // Estimated number of kmers for this block.
+            size_t numSuperMers = std::max<size_t>(1, endIndex - startIndex);
+            size_t reserveSize = numSuperMers / 4 + 4;  // heuristic expansion estimate
 
-        // Loop through assigned portion of superMers
-        for (size_t i = startIndex; i < endIndex; ++i) {
-            const std::string& sm = superMers[i];
+            // Reserve
+            myOutput.reserve(reserveSize);
 
-            if (sm.size() < k) continue;
+            // Loop through assigned portion of superMers
+            for (size_t i = startIndex; i < endIndex; ++i) {
+                const std::string& sm = superMers[i];
 
-            size_t numKmers = sm.size()- k + 1;
+                if (sm.size() < k) continue;
 
-            KmerBlock* block = new KmerBlock(numKmers);
-            block->kmers.reserve(numKmers);
+                size_t numKmers = sm.size()- k + 1;
 
-            // Extract kmers from this super-mer
-            for (size_t j = 0; j < numKmers; j++) {
-                block->kmers.push_back(sm.substr(j, k));
+                KmerBlock* block = new KmerBlock(numKmers);
+                block->kmers.reserve(numKmers);
+
+                // Extract kmers from this super-mer
+                for (size_t j = 0; j < numKmers; j++) {
+                    block->kmers.push_back(sm.substr(j, k));
+                }
+
+                myOutput.push_back(block);
             }
-
-            myOutput.push_back(block);
-        }
-    });
-}
-
-// Wait for all threads to finish.
-for (auto& t : workers) t.join();
-
-// Merge
-for (auto& vec : localBlocks) {
-    for (KmerBlock* blk : vec) {
-        inputQueue.push(blk);
+        });
     }
-}
+
+    // Wait for all threads to finish.
+    for (auto& t : workers) t.join();
+
+    // Merge
+    for (auto& vec : localBlocks) {
+        for (KmerBlock* blk : vec) {
+            inputQueue.push(blk);
+        }
+    }
 
 
     auto queue_end = clock::now();
-    std::cout << "Queue batching time (multithreaded): "
+    std::cout << "Queue batching time: "
               << std::chrono::duration<double>(queue_end - queue_start).count()
               << " sec\n";
 
     std::cout << "Queue size after batching: " << inputQueue.size() << "\n";
 
-    // Inspect first 3 k-mer blocks
-    int cnt = 0;
-    std::queue<KmerBlock*> tempQueue = inputQueue;
-    while (!tempQueue.empty() && cnt < 3) {
-        KmerBlock* block = tempQueue.front(); tempQueue.pop();
-        std::cout << "Block " << cnt << " has " << block->kmers.size() << " kmers\n";
-        for (int j = 0; j < std::min(5, (int)block->kmers.size()); j++) {
+    // to check
+    if (!inputQueue.empty()) {
+        KmerBlock* block = inputQueue.front();
+        std::cout << "First block has " << block->kmers.size() << " kmers\n";
+
+        for (int j = 0; j < 2; j++) {
             std::cout << "  kmer[" << j << "] = " << block->kmers[j] << "\n";
         }
-        cnt++;
     }
 
-    // Clean up dynamically allocated KmerBlocks
+    // Clean up KmerBlocks
     while (!inputQueue.empty()) {
         delete inputQueue.front();
         inputQueue.pop();
     }
 
-    // ------------------------
-    // TOTAL TIMER END
-    // ------------------------
+    // end
     auto total_end = clock::now();
     std::cout << "TOTAL runtime: "
               << std::chrono::duration<double>(total_end - total_start).count()
               << " sec\n";
-
-    std::cout << "Queue testing complete.\n";
     return 0;
 }

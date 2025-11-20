@@ -10,6 +10,8 @@
 #include <queue>
 #include <mutex>
 #include <condition_variable>
+#include <algorithm>
+
 
 
 // Super simple version: just read 1 file into bundles
@@ -138,6 +140,7 @@ void pushSuperMersToQueue(const std::vector<std::string>& superMers, int k,
                            std::mutex& queueLock,
                            std::condition_variable& cv) {
     std::vector<KmerBlock*> localBatch;
+    // could be 100::: MAKE SURE TO CHANGE FOR BIG***
     localBatch.reserve(10);
 
     for(const auto& superMer: superMers) {
@@ -147,7 +150,8 @@ void pushSuperMersToQueue(const std::vector<std::string>& superMers, int k,
             block->kmers.push_back(kmer);
         }
         localBatch.push_back(block);
-
+        
+        // Here too
         if (localBatch.size() >= 10) {
             {
                 std::lock_guard<std::mutex> lock(queueLock);
@@ -186,97 +190,98 @@ void generateTestFasta(const std::string& filename, size_t length) {
     }
     out << "\n";
 }
+int main(int argc, char** argv) {
+    if (argc < 5 || argc > 6) {
+        std::cout << "Usage:\n"
+                  << "  Option A (generate FASTA): \n"
+                  << "      ./pipeline <fasta_size> <k> <m> <numThreads>\n\n"
+                  << "  Option B (use existing file):\n"
+                  << "      ./pipeline <filepath> <k> <m> <numThreads>\n";
+        return 1;
+    }
 
-int main() {
-    const int k = 6;
-    const int m = 5;
-    const unsigned NUM_THREADS = 8;
-    const size_t HASH_TABLE_SIZE = 10000000;
+    std::string inputArg = argv[1];
+    bool isNumber = std::all_of(inputArg.begin(), inputArg.end(), ::isdigit);
+
+    size_t fastaSize = 0;
+    std::string fastaPath;
+
+    // bruh why
+    if (isNumber) {
+        fastaSize = std::stoull(inputArg);
+        fastaPath = "generated.fasta";
+    } else {
+        fastaPath = inputArg;
+    }
+
+    int k = std::stoi(argv[2]);
+    int m = std::stoi(argv[3]);
+    unsigned NUM_THREADS = std::stoi(argv[4]);
+
+    const size_t HASH_TABLE_SIZE = 10'000'000;
     const size_t MAX_PROBE_STEPS = 100;
 
-    std::cout << "Generating test FASTA...\n";
-    generateTestFasta("test_large.fasta", 5'000'000);
+    // check to make sure its a number
+    if (isNumber) {
+        std::cout << "Generating FASTA of length " << fastaSize << "...\n";
+        generateTestFasta(fastaPath, fastaSize);
+    } else {
+        std::cout << "Using existing FASTA file: " << fastaPath << "\n";
+    }
 
+    // Read
     std::cout << "Reading FASTA bundles...\n";
-    FastReader reader("test_large.fasta");
+    FastReader reader(fastaPath);
     auto bundles = reader.readFile();
     std::cout << "Read " << bundles.size() << " bundles\n";
 
+    // Calc SUperMErs
     std::cout << "Computing super-mers...\n";
     std::vector<std::string> superMers;
     for (auto& b : bundles) {
-        auto partial = computeSuperMers(
-            std::string(b.data.begin(), b.data.end()),
-            m,
-            k
-        );
+        auto partial = computeSuperMers(std::string(b.data.begin(), b.data.end()),m,k);
         superMers.insert(superMers.end(), partial.begin(), partial.end());
     }
     std::cout << "Total super-mers: " << superMers.size() << "\n";
 
+    // Q + Hasher
     std::queue<KmerBlock*> inputQueue;
     std::mutex queueLock;
     std::condition_variable cv;
 
     std::cout << "Initializing Hasher...\n";
     Hasher hasher(inputQueue, NUM_THREADS, HASH_TABLE_SIZE, MAX_PROBE_STEPS);
-    
+
     std::vector<std::thread> threads;
-    
+
     std::cout << "Launching " << NUM_THREADS << " worker threads...\n";
     for (unsigned i = 0; i < NUM_THREADS; i++) {
         threads.emplace_back(&Hasher::worker, &hasher, i);
     }
 
+    // Push into qu
     std::cout << "Pushing super-mers to queue...\n";
     pushSuperMersToQueue(superMers, k, inputQueue, queueLock, cv);
-    
+
     std::cout << "Queue size after batching: " << inputQueue.size() << "\n";
 
+    // Telling workers done
     std::cout << "Signaling completion...\n";
     hasher.signalComplete();
-    
+
     std::cout << "Waiting for threads to finish...\n";
-    for (auto& t : threads) {
-        t.join();
-    }
+    for (auto& t : threads) t.join();
 
-    std::cout << "Merging results from " << NUM_THREADS << " threads...\n";
-
-    // Debug: Check each thread's table before merging
-    for (unsigned i = 0; i < NUM_THREADS; i++) {
-        std::cout << "Thread " << i << " table:\n";
-        hasher.threadTables[i].printStats();
-    }
-
+    // Merge to table
+    std::cout << "Merging results...\n";
     hasher.mergeResults();
-    
+
     const auto& results = hasher.getResults();
     std::cout << "Total unique k-mers: " << results.size() << "\n";
 
     std::cout << "Writing results to output.txt...\n";
     hasher.writeResults("output.txt");
 
-    std::cout << "\n=== Statistics ===\n";
-    std::cout << "Total unique k-mers: " << results.size() << "\n";
-    
-    size_t maxCount = 0;
-    std::string maxKmer;
-    for (const auto& [kmer, count] : results) {
-        if (count > maxCount) {
-            maxCount = count;
-            maxKmer = kmer;
-        }
-    }
-    std::cout << "Most frequent k-mer: " << maxKmer << " (count: " << maxCount << ")\n";
-    
-    std::cout << "\nSample k-mers:\n";
-    int shown = 0;
-    for (const auto& [kmer, count] : results) {
-        if (shown++ >= 5) break;
-        std::cout << "  " << kmer << " -> " << count << "\n";
-    }
-
-    std::cout << "\nProcessing complete!\n";
+    std::cout << "Processing complete!\n";
     return 0;
 }
