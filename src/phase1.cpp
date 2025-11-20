@@ -185,50 +185,26 @@ std::vector<std::string> superMerToKmers(const std::string& superMer, int k) {
 }
 
 
-// lowkey same as readFile but pushing to queue in batches of 10
-// with locking and cv notifying
+// Assume KmerBlock and FastReader are defined as before
 
-void pushSuperMersToQueue(const std::vector<std::string>& superMers, int k,
-                           std::queue<KmerBlock*>& inputQueue,
-                           std::mutex& queueLock,
-                           std::condition_variable& cv) {
-    // first u want to reserve a batching of 10
-    std::vector<KmerBlock*> localBatch;
-    localBatch.reserve(10);
+// Push a single super-mer's kmers into the queue
+void pushSuperMerToQueue(const std::string& superMer, int k,
+                         std::queue<KmerBlock*>& inputQueue,
+                         std::mutex& queueLock,
+                         std::condition_variable& cv) {
+    if (superMer.size() < (size_t)k) return;
 
-    for(const auto& superMer: superMers) {
-        auto kmers = superMerToKmers(superMer, k);
-        KmerBlock* block = new KmerBlock(kmers.size());
-        for(const auto& kmer: kmers) {
-            block->kmers.push_back(kmer);
-        }
-        localBatch.push_back(block);
+    size_t numKmers = superMer.size() - k + 1;
+    KmerBlock* block = new KmerBlock(numKmers);
+    block->kmers.reserve(numKmers);
+    for (size_t i = 0; i < numKmers; ++i)
+        block->kmers.push_back(superMer.substr(i, k));
 
-        if (localBatch.size() >= 10) {
-            // push to shared queue
-            {
-                std::lock_guard<std::mutex> lock(queueLock);
-                for(auto b: localBatch) {
-                    inputQueue.push(b);
-                }
-            }
-            cv.notify_all();
-            localBatch.clear();
-        }
+    {
+        std::lock_guard<std::mutex> lock(queueLock);
+        inputQueue.push(block);
     }
-    // push any remaining blocks
-    if (!localBatch.empty()) {
-        {
-            std::lock_guard<std::mutex> lock(queueLock);
-            for(auto b: localBatch) {
-                inputQueue.push(b);     
-            }
-        }
-        cv.notify_all();    
-    }
-
-
-
+    cv.notify_all();
 }
 
  #include <fstream>
@@ -248,167 +224,195 @@ void generateTestFasta(const std::string& filename, size_t length) {
     }
     out << "\n";
 }
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <string>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <thread>
+#include <atomic>      
 
-#include <chrono>
 
 int main() {
     const int k = 31;
     const int m = 15;
-
+    const size_t MAX_QUEUE_SIZE = 1000; // flush threshold
     using clock = std::chrono::high_resolution_clock;
 
-    // ------------------------
-    // TOTAL TIMER START
-    // ------------------------
     auto total_start = clock::now();
 
-    // 1. Generate small FASTA
-    std::cout << "Generating test FASTA...\n";
-    generateTestFasta("test_large.fasta", 5'000'000); // 5 million bases
-
-    // 2. Read FASTA into bundles
     std::cout << "Reading FASTA bundles...\n";
-    FastReader reader("test_large.fasta");
+    FastReader reader("GCA_000002315.5_GRCg6a_genomic.fna");
     auto bundles = reader.readFile();
     std::cout << "Read " << bundles.size() << " bundles\n";
 
-    // ------------------------
-    // SUPERMER PHASE TIMER
-    // ------------------------
     auto supermer_start = clock::now();
 
-    // // 3. Compute super-mers for each bundle
-    std::vector<std::string> superMers;
-    for (auto& b : bundles) {
-        auto partial = computeSuperMers(
-            std::string(b.data.begin(), b.data.end()), m, k
-        );
-        superMers.insert(superMers.end(), partial.begin(), partial.end());
+    std::queue<KmerBlock*> inputQueue;
+    std::mutex queueLock;
+    std::condition_variable cv;
+
+    const unsigned NUM_THREADS = 8;
+    std::atomic<size_t> bundleIndex(0);
+
+    // Worker threads
+    std::vector<std::thread> workers;
+    for (unsigned t = 0; t < NUM_THREADS; t++) {
+        workers.emplace_back([&]() {
+            while (true) {
+                size_t idx = bundleIndex.fetch_add(1);
+                if (idx >= bundles.size()) break;
+
+                auto& b = bundles[idx];
+                auto superMers = computeSuperMers(
+                    std::string(b.data.begin(), b.data.end()), m, k
+                );
+
+                for (auto& sm : superMers) {
+                    pushSuperMerToQueue(sm, k, inputQueue, queueLock, cv);
+
+                    // Flush queue if it exceeds MAX_QUEUE_SIZE
+                    bool flush = false;
+                    {
+                        std::lock_guard<std::mutex> lock(queueLock);
+                        if (inputQueue.size() >= MAX_QUEUE_SIZE) flush = true;
+                    }
+
+                    if (flush) {
+                        std::lock_guard<std::mutex> lock(queueLock);
+                        // std::cout << "Yay! Queue reached " << inputQueue.size()
+                        //           << " blocks. Clearing...\n";
+
+                        while (!inputQueue.empty()) {
+                            delete inputQueue.front();
+                            inputQueue.pop();
+                        }
+                    }
+                }
+            }
+        });
     }
-    
+
+    // Join threads
+    for (auto& th : workers) th.join();
+
+    // Final flush if anything remains
+    if (!inputQueue.empty()) {
+        std::cout << "Final flush: clearing remaining " << inputQueue.size() << " blocks\n";
+        while (!inputQueue.empty()) {
+            delete inputQueue.front();
+            inputQueue.pop();
+        }
+    }
+
     auto supermer_end = clock::now();
-    std::cout << "Super-mer computation time: "
+    std::cout << "Super-mer + queue batching time: "
               << std::chrono::duration<double>(supermer_end - supermer_start).count()
               << " sec\n";
 
-    std::cout << "Total super-mers: " << superMers.size() << "\n";
-
-    // Inspect first 5 super-mers
-    std::cout << "First 5 super-mers:\n";
-    for (size_t i = 0; i < std::min(superMers.size(), size_t(5)); i++) {
-        std::cout << "Super-mer[" << i << "] length: " << superMers[i].size()
-                  << " content: " << superMers[i] << "\n";
-    }
-
-    // ------------------------
-    // MULTITHREADED QUEUE PHASE TIMER
-    // ------------------------
-    auto queue_start = clock::now();
-
-    // 4. Expand super-mers -> KmerBlocks in parallel (no per-kmer locks)
-//    We will process the global superMers vector (already computed), partition it,
-//    let each thread produce a vector<KmerBlock*> localBlocks[t], then merge.
-
-// Expand super-mers into KmerBlocks (parallel, no locking)
-std::queue<KmerBlock*> inputQueue;
-
-const unsigned NUM_THREADS = 8;
-const size_t N = superMers.size();
-
-// Divide superMers into equal ranges
-const size_t CHUNK = (N + NUM_THREADS - 1) / NUM_THREADS;
-
-// each thread will have stuffper thread
-std::vector<std::vector<KmerBlock*>> localBlocks(NUM_THREADS);
-
-// Spawn worker threads
-std::vector<std::thread> workers;
-workers.reserve(NUM_THREADS);
-
-for (unsigned thr = 0; thr < NUM_THREADS; ++thr) {
-    // each worker
-    workers.emplace_back([&, thr]() {
-
-        size_t startIndex = thr * CHUNK;
-        size_t endIndex   = std::min(startIndex + CHUNK, N);
-
-        // what ur trynna add to
-
-        auto& myOutput = localBlocks[thr];
-        
-        // mem reserve
-        size_t numSuperMers = (endIndex > startIndex) ? (endIndex - startIndex) : 1;
-        // rough
-        size_t reserveSize = numSuperMers / 4 + 4;
-
-        // Reserve
-        myOutput.reserve(reserveSize);
-
-        // Loop through assigned portion of superMers
-        for (size_t i = startIndex; i < endIndex; ++i) {
-            const std::string& sm = superMers[i];
-
-            if (sm.size() < k) continue;
-
-            size_t numKmers = sm.size()- k + 1;
-
-            KmerBlock* block = new KmerBlock(numKmers);
-            block->kmers.reserve(numKmers);
-
-            // Extract kmers from this super-mer
-            for (size_t j = 0; j < numKmers; j++) {
-                block->kmers.push_back(sm.substr(j, k));
-            }
-
-            myOutput.push_back(block);
-        }
-    });
-}
-
-// Wait for all threads to finish.
-for (auto& t : workers) t.join();
-
-// Merge
-for (auto& vec : localBlocks) {
-    for (KmerBlock* blk : vec) {
-        inputQueue.push(blk);
-    }
-}
-
-
-    auto queue_end = clock::now();
-    std::cout << "Queue batching time (multithreaded): "
-              << std::chrono::duration<double>(queue_end - queue_start).count()
-              << " sec\n";
-
-    std::cout << "Queue size after batching: " << inputQueue.size() << "\n";
-
-    // Inspect first 3 k-mer blocks
-    int cnt = 0;
-    std::queue<KmerBlock*> tempQueue = inputQueue;
-    while (!tempQueue.empty() && cnt < 3) {
-        KmerBlock* block = tempQueue.front(); tempQueue.pop();
-        std::cout << "Block " << cnt << " has " << block->kmers.size() << " kmers\n";
-        for (int j = 0; j < std::min(5, (int)block->kmers.size()); j++) {
-            std::cout << "  kmer[" << j << "] = " << block->kmers[j] << "\n";
-        }
-        cnt++;
-    }
-
-    // Clean up dynamically allocated KmerBlocks
-    while (!inputQueue.empty()) {
-        delete inputQueue.front();
-        inputQueue.pop();
-    }
-
-    // ------------------------
-    // TOTAL TIMER END
-    // ------------------------
     auto total_end = clock::now();
     std::cout << "TOTAL runtime: "
               << std::chrono::duration<double>(total_end - total_start).count()
               << " sec\n";
 
-    std::cout << "Queue testing complete.\n";
+    std::cout << "Queue processing complete.\n";
     return 0;
 }
+
+
+
+//________________
+
+
+
+// // lowkey same as readFile but pushing to queue in batches of 10
+// // with locking and cv notifying
+// void pushSuperMersToQueue(const std::vector<std::string>& superMers, int k,
+//                            std::queue<KmerBlock*>& inputQueue,
+//                            std::mutex& queueLock,
+//                            std::condition_variable& cv,
+//                            unsigned NUM_THREADS = 8) {
+//     size_t N = superMers.size();
+//     size_t CHUNK = (N + NUM_THREADS - 1) / NUM_THREADS;
+
+//     // Each thread will have its local vector of KmerBlocks
+//     std::vector<std::vector<KmerBlock*>> localBlocks(NUM_THREADS);
+
+//     // Spawn threads
+//     std::vector<std::thread> workers;
+//     workers.reserve(NUM_THREADS);
+
+//     for (unsigned thr = 0; thr < NUM_THREADS; ++thr) {
+//         workers.emplace_back([&, thr]() {
+//             size_t startIndex = thr * CHUNK;
+//             size_t endIndex = std::min(startIndex + CHUNK, N);
+
+//             auto& myOutput = localBlocks[thr];
+
+//             // Rough reserve
+//             size_t numSuperMers = (endIndex > startIndex) ? (endIndex - startIndex) : 1;
+//             myOutput.reserve(numSuperMers / 4 + 4);
+
+//             // Process assigned super-mers
+//             for (size_t i = startIndex; i < endIndex; ++i) {
+//                 const std::string& sm = superMers[i];
+//                 if (sm.size() < k) continue;
+
+//                 size_t numKmers = sm.size() - k + 1;
+//                 KmerBlock* block = new KmerBlock(numKmers);
+//                 block->kmers.reserve(numKmers);
+
+//                 for (size_t j = 0; j < numKmers; ++j) {
+//                     block->kmers.push_back(sm.substr(j, k));
+//                 }
+
+//                 myOutput.push_back(block);
+//             }
+//         });
+//     }
+
+//     // Wait for threads to finish
+//     for (auto& t : workers) t.join();
+
+//     // Merge local blocks into the shared queue
+//     {
+//         std::lock_guard<std::mutex> lock(queueLock);
+//         for (auto& vec : localBlocks) {
+//             for (KmerBlock* blk : vec) {
+//                 inputQueue.push(blk);
+//             }
+//         }
+//     }
+
+//     // Notify any waiting threads
+//     cv.notify_all();
+// }
+
+// Sequential version: push super-mers to the shared queue safely
+// void pushSuperMersToQueue(const std::vector<std::string>& superMers, int k,
+//                            std::queue<KmerBlock*>& inputQueue,
+//                            std::mutex& queueLock,
+//                            std::condition_variable& cv) {
+//     for (const auto& sm : superMers) {
+//         if (sm.size() < (size_t)k) continue;
+
+//         size_t numKmers = sm.size() - k + 1;
+//         KmerBlock* block = new KmerBlock(numKmers);
+//         block->kmers.reserve(numKmers);
+
+//         for (size_t i = 0; i < numKmers; ++i) {
+//             block->kmers.push_back(sm.substr(i, k));
+//         }
+
+//         // Push safely into the shared queue
+//         {
+//             std::lock_guard<std::mutex> lock(queueLock);
+//             inputQueue.push(block);
+//         }
+//     }
+
+//     // Notify any waiting threads
+//     cv.notify_all();
+// }
