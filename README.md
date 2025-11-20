@@ -23,14 +23,14 @@ You can compile the k-mer counting pipeline by running the following command:
 You can use the k-mer counting pipeline by running the following command:
 
 Run with an input FASTA file:
+
 ``` ./pipeline <input_size> <k> <m> <num_threads> ```
 
-eg. ``` ./pipeline 5000000 6 5 8 ```
+eg. ``` ./pipeline 5000000 6 5 8 ```  
+
+<br>
 
 Run with a randomly-generated file of a specified size:
-
-
-
 
 ``` ./pipeline <input_path> <k> <m> <num_threads> ```
 
