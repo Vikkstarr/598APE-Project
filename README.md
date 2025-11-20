@@ -7,6 +7,7 @@ This is a recreation of Gerbil, a fast and memory efficient k-mer counter. Count
 Download the source files:
 
 ``` git clone https://github.com/Vikkstarr/598APE-Project ```
+
 ``` cd src ```
 
 
